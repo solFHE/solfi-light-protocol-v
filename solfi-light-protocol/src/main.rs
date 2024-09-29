@@ -18,22 +18,21 @@ use std::thread;
 use std::time::Duration;
 use serde_json::{json, Value};
 use rusqlite::Connection;
-use solana_transaction_status::option_serializer::OptionSerializer;
 use url::Url;
-use sha2::{Sha256, Digest};
-use base64::{Engine as _, engine::general_purpose};
 use solana_sdk::{
-    signature::{Keypair, Signer, Signature},
+    signature::{Keypair, Signer},
     transaction::Transaction,
     system_instruction,
     pubkey::Pubkey,
 };
 use solana_client::rpc_client::RpcClient;
-use solana_transaction_status::UiTransactionEncoding;
-use spl_memo;
-use std::fs::File;
-use std::io::Write;
-use std::process::Command;
+use light_sdk::{
+    compressed_account::CompressedAccount,
+    stateless::Rpc,
+    instruction::{create_invoke_instruction, InstructionDataInvoke},
+    merkle_context::MerkleContext,
+    proof::CompressedProof,
+};
 
 const BLOCKCHAIN_NETWORKS: [&str; 20] = [
     "bitcoin", "ethereum", "scroll", "polkadot", "solana", "zk-lokomotive", "cosmos",
@@ -113,18 +112,23 @@ fn get_most_common_word(word_counter: &HashMap<String, u32>) -> Option<(String, 
         .map(|(word, count)| (word.clone(), *count))
 }
 
-fn zk_compress(data: &str) -> String {
-    let compressed = general_purpose::STANDARD_NO_PAD.encode(data);
-    println!("Compressed data: {}", compressed);
-    compressed
+fn zk_compress(data: &str, client: &RpcClient, payer: &Keypair) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
+    let compressed_account = CompressedAccount {
+        owner: payer.pubkey(),
+        lamports: 0,
+        address: None,
+        data: Some(data.as_bytes().to_vec()),
+    };
+
+    Ok(compressed_account)
 }
 
-fn zk_decompress(compressed_data: &str) -> Result<String, Box<dyn std::error::Error>> {
-    println!("Attempting to decompress: {}", compressed_data);
-    let bytes = general_purpose::STANDARD_NO_PAD.decode(compressed_data.trim_matches('"'))?;
-    let decompressed = String::from_utf8(bytes)?;
-    println!("Decompressed data: {}", decompressed);
-    Ok(decompressed)
+
+fn zk_decompress(compressed_account: &CompressedAccount) -> Result<String, Box<dyn std::error::Error>> {
+    match &compressed_account.data {
+        Some(data) => Ok(String::from_utf8(data.clone())?),
+        None => Err("No data in compressed account".into()),
+    }
 }
 
 fn create_solana_account() -> Keypair {
@@ -173,20 +177,42 @@ fn transfer_compressed_hash(
     client: &RpcClient,
     payer: &Keypair,
     to: &Pubkey,
-    compressed_hash: &str,
+    compressed_account: &CompressedAccount,
     original_json: &Value,
-) -> Result<Signature, Box<dyn std::error::Error>> {
-    ensure_minimum_balance(client, &payer.pubkey(), 1_000_000_000)?; // Ensure 1 SOL minimum
+) -> Result<String, Box<dyn std::error::Error>> {
+    ensure_minimum_balance(client, &payer.pubkey(), 1_000_000_000)?;
 
-    let rent = client.get_minimum_balance_for_rent_exemption(0)?;
-    let transfer_amount = rent + 1000; // Transfer rent + 1000 lamports
+    let merkle_tree_pubkey = Pubkey::new_unique(); // Bu gerçek bir Merkle ağacı pubkey'i olmalı
+    let merkle_context = MerkleContext {
+        merkle_tree_pubkey,
+        nullifier_queue_pubkey: Pubkey::new_unique(), // Bu gerçek bir nullifier queue pubkey'i olmalı
+        leaf_index: 0, // Bu, Merkle ağacındaki gerçek indeks olmalı
+        queue_index: None,
+    };
 
-    let transfer_ix = system_instruction::transfer(&payer.pubkey(), to, transfer_amount);
-    let memo_ix = spl_memo::build_memo(compressed_hash.as_bytes(), &[&payer.pubkey()]);
-    
+    let input_compressed_accounts = vec![];
+    let output_compressed_accounts = vec![compressed_account.clone()];
+    let proof = CompressedProof::default(); // Gerçek bir proof oluşturulmalı
+
+    let instruction = create_invoke_instruction(
+        &payer.pubkey(),
+        &payer.pubkey(),
+        &input_compressed_accounts,
+        &output_compressed_accounts,
+        &[merkle_context],
+        &[merkle_tree_pubkey],
+        &[0], // root indices
+        &[], // new address params
+        Some(proof),
+        None, // compress_or_decompress_lamports
+        false, // is_compress
+        None, // decompression_recipient
+        true, // sort
+    );
+
     let recent_blockhash = client.get_latest_blockhash()?;
     let transaction = Transaction::new_signed_with_payer(
-        &[transfer_ix, memo_ix],
+        &[instruction],
         Some(&payer.pubkey()),
         &[payer],
         recent_blockhash,
@@ -198,41 +224,76 @@ fn transfer_compressed_hash(
 
     print_formatted_json(original_json, "Original ");
 
-    Ok(signature)
+    Ok(signature.to_string())
 }
 
-fn retrieve_and_decompress_hash(client: &RpcClient, signature: &Signature) -> Result<Value, Box<dyn std::error::Error>> {
-    let transaction = client.get_transaction(signature, UiTransactionEncoding::Json)?;
+
+// fn retrieve_and_decompress_hash(client: &RpcClient, signature: &Signature) -> Result<Value, Box<dyn std::error::Error>> {
+//     let transaction = client.get_transaction(signature, UiTransactionEncoding::Json)?;
     
-    if let Some(meta) = transaction.transaction.meta {
-        if let OptionSerializer::Some(log_messages) = meta.log_messages {
-            for log in log_messages {
-                println!("Processing log: {}", log);  
-                if log.starts_with("Program log: Memo") {
-                    if let Some(start_index) = log.find("): ") {
-                        let compressed_hash = &log[start_index + 3..];
-                        println!("Compressed hash: {}", compressed_hash);  
-                        match zk_decompress(compressed_hash) {
-                            Ok(decompressed_hash) => {
-                                println!("Decompressed hash: {}", decompressed_hash);  
-                                match serde_json::from_str(&decompressed_hash) {
-                                    Ok(json_data) => {
-                                        print_formatted_json(&json_data, "Retrieved ");
-                                        return Ok(json_data);
-                                    },
-                                    Err(e) => println!("Error parsing JSON: {}. Raw data: {}", e, decompressed_hash),  
-                                }
-                            },
-                            Err(e) => println!("Error decompressing: {}. Raw data: {}", e, compressed_hash),  
-                        }
-                    }
-                }
+//     if let Some(meta) = transaction.transaction.meta {
+//         if let OptionSerializer::Some(log_messages) = meta.log_messages {
+//             for log in log_messages {
+//                 println!("Processing log: {}", log);  
+//                 if log.starts_with("Program log: Memo") {
+//                     if let Some(start_index) = log.find("): ") {
+//                         let compressed_hash = &log[start_index + 3..];
+//                         println!("Compressed hash: {}", compressed_hash);  
+//                         match zk_decompress(compressed_hash) {
+//                             Ok(decompressed_hash) => {
+//                                 println!("Decompressed hash: {}", decompressed_hash);  
+//                                 match serde_json::from_str(&decompressed_hash) {
+//                                     Ok(json_data) => {
+//                                         print_formatted_json(&json_data, "Retrieved ");
+//                                         return Ok(json_data);
+//                                     },
+//                                     Err(e) => println!("Error parsing JSON: {}. Raw data: {}", e, decompressed_hash),  
+//                                 }
+//                             },
+//                             Err(e) => println!("Error decompressing: {}. Raw data: {}", e, compressed_hash),  
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+
+//     Err("Could not find or process memo in transaction logs".into())
+// }
+
+async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<Value, Box<dyn std::error::Error>> {
+
+    let transaction = client.get_transaction(signature)?;
+
+
+    let compressed_account = find_compressed_account_in_transaction(&transaction)?;
+
+
+    let decompressed_data = zk_decompress(&compressed_account)?;
+
+
+    let json_data: Value = serde_json::from_str(&decompressed_data)?;
+
+    print_formatted_json(&json_data, "Retrieved ");
+    Ok(json_data)
+}
+
+fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
+    // Bu fonksiyon, işlem içindeki compressed account'u bulmalı
+    // Light Protocol'ün işlem yapısına göre bu implementasyon değişebilir
+    // Örnek bir implementasyon:
+    for instruction in &transaction.message.instructions {
+        if instruction.program_id == light_sdk::ID {
+            // Bu instruction'ın Light Protocol'e ait olduğunu varsayıyorum (bilmiyoruuuumm)
+            if let Some(compressed_account_data) = instruction.data.get(..32) {
+                return Ok(CompressedAccount::try_from_slice(compressed_account_data)?);
             }
         }
     }
-
-    Err("Could not find or process memo in transaction logs".into())
+    Err("No compressed account found in transaction".into())
 }
+
+
 
 fn print_formatted_json(json_value: &Value, prefix: &str) {
     println!("{}JSON data:", prefix);
