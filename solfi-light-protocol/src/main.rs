@@ -22,17 +22,21 @@ use url::Url;
 use solana_sdk::{
     signature::{Keypair, Signer},
     transaction::Transaction,
-    system_instruction,
     pubkey::Pubkey,
 };
 use solana_client::rpc_client::RpcClient;
+use std::fs::File;
+use std::io::Write;
+use std::process::Command;
+
 use light_sdk::{
     compressed_account::CompressedAccount,
-    stateless::Rpc,
     instruction::{create_invoke_instruction, InstructionDataInvoke},
     merkle_context::MerkleContext,
     proof::CompressedProof,
+    stateless::Rpc,
 };
+
 
 const BLOCKCHAIN_NETWORKS: [&str; 20] = [
     "bitcoin", "ethereum", "scroll", "polkadot", "solana", "zk-lokomotive", "cosmos",
@@ -112,7 +116,7 @@ fn get_most_common_word(word_counter: &HashMap<String, u32>) -> Option<(String, 
         .map(|(word, count)| (word.clone(), *count))
 }
 
-fn zk_compress(data: &str, client: &RpcClient, payer: &Keypair) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
+async fn zk_compress(data: &str, client: &Rpc, payer: &Keypair) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
     let compressed_account = CompressedAccount {
         owner: payer.pubkey(),
         lamports: 0,
@@ -124,7 +128,8 @@ fn zk_compress(data: &str, client: &RpcClient, payer: &Keypair) -> Result<Compre
 }
 
 
-fn zk_decompress(compressed_account: &CompressedAccount) -> Result<String, Box<dyn std::error::Error>> {
+
+async fn zk_decompress(compressed_account: &CompressedAccount) -> Result<String, Box<dyn std::error::Error>> {
     match &compressed_account.data {
         Some(data) => Ok(String::from_utf8(data.clone())?),
         None => Err("No data in compressed account".into()),
@@ -173,26 +178,26 @@ fn ensure_minimum_balance(client: &RpcClient, pubkey: &Pubkey, minimum_balance: 
     Err("Failed to ensure minimum balance after multiple attempts".into())
 }
 
-fn transfer_compressed_hash(
-    client: &RpcClient,
+async fn transfer_compressed_hash(
+    client: &Rpc,
     payer: &Keypair,
     to: &Pubkey,
     compressed_account: &CompressedAccount,
     original_json: &Value,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    ensure_minimum_balance(client, &payer.pubkey(), 1_000_000_000)?;
+    ensure_minimum_balance(client, &payer.pubkey(), 1_000_000_000).await?;
 
-    let merkle_tree_pubkey = Pubkey::new_unique(); // Bu gerçek bir Merkle ağacı pubkey'i olmalı
+    let merkle_tree_pubkey = Pubkey::new_unique();
     let merkle_context = MerkleContext {
         merkle_tree_pubkey,
-        nullifier_queue_pubkey: Pubkey::new_unique(), // Bu gerçek bir nullifier queue pubkey'i olmalı
-        leaf_index: 0, // Bu, Merkle ağacındaki gerçek indeks olmalı
+        nullifier_queue_pubkey: Pubkey::new_unique(),
+        leaf_index: 0,
         queue_index: None,
     };
 
     let input_compressed_accounts = vec![];
     let output_compressed_accounts = vec![compressed_account.clone()];
-    let proof = CompressedProof::default(); // Gerçek bir proof oluşturulmalı
+    let proof = CompressedProof::default();
 
     let instruction = create_invoke_instruction(
         &payer.pubkey(),
@@ -201,16 +206,16 @@ fn transfer_compressed_hash(
         &output_compressed_accounts,
         &[merkle_context],
         &[merkle_tree_pubkey],
-        &[0], // root indices
-        &[], // new address params
+        &[0],
+        &[],
         Some(proof),
-        None, // compress_or_decompress_lamports
-        false, // is_compress
-        None, // decompression_recipient
-        true, // sort
+        None,
+        false,
+        None,
+        true,
     );
 
-    let recent_blockhash = client.get_latest_blockhash()?;
+    let recent_blockhash = client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
         &[instruction],
         Some(&payer.pubkey()),
@@ -218,7 +223,7 @@ fn transfer_compressed_hash(
         recent_blockhash,
     );
     
-    let signature = client.send_and_confirm_transaction(&transaction)?;
+    let signature = client.send_and_confirm_transaction(&transaction).await?;
     println!("🏆 Successfully transferred compressed hash. Transaction signature: {}", signature);
     println!("⛓️✅ Transaction link: https://explorer.solana.com/tx/{}?cluster=custom", signature);
 
@@ -262,16 +267,11 @@ fn transfer_compressed_hash(
 // }
 
 async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<Value, Box<dyn std::error::Error>> {
-
-    let transaction = client.get_transaction(signature)?;
-
-
+    let transaction = client.get_transaction(&signature.parse()?).await?;
+    
     let compressed_account = find_compressed_account_in_transaction(&transaction)?;
 
-
-    let decompressed_data = zk_decompress(&compressed_account)?;
-
-
+    let decompressed_data = zk_decompress(&compressed_account).await?;
     let json_data: Value = serde_json::from_str(&decompressed_data)?;
 
     print_formatted_json(&json_data, "Retrieved ");
@@ -279,12 +279,8 @@ async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<V
 }
 
 fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
-    // Bu fonksiyon, işlem içindeki compressed account'u bulmalı
-    // Light Protocol'ün işlem yapısına göre bu implementasyon değişebilir
-    // Örnek bir implementasyon:
     for instruction in &transaction.message.instructions {
         if instruction.program_id == light_sdk::ID {
-            // Bu instruction'ın Light Protocol'e ait olduğunu varsayıyorum (bilmiyoruuuumm)
             if let Some(compressed_account_data) = instruction.data.get(..32) {
                 return Ok(CompressedAccount::try_from_slice(compressed_account_data)?);
             }
@@ -308,19 +304,19 @@ fn save_json_to_file(json_data: &Value, filename: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting Solfhe Analyzer");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting Solfhe Analyzer with Light Protocol");
 
-    let client = RpcClient::new("http://localhost:8899".to_string());
+    let client = Rpc::new("http://localhost:8899".to_string());
     
-    let account1 = create_solana_account();
-    let account2 = create_solana_account();
+    let account1 = Keypair::new();
+    let account2 = Keypair::new();
     
     println!("Account 1 public key: {}", account1.pubkey());
     println!("Account 2 public key: {}", account2.pubkey());
     
-    // Ensure minimum balance for account1
-    ensure_minimum_balance(&client, &account1.pubkey(), 1_000_000_000)?;
+    ensure_minimum_balance(&client, &account1.pubkey(), 1_000_000_000).await?;
     
     let mut links = Vec::new();
     let mut word_counter = HashMap::new();
@@ -347,24 +343,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             print_formatted_json(&result, "Original ");
 
                             let json_string = result.to_string();
-                            let compressed_result = zk_compress(&json_string);
+                            let compressed_result = zk_compress(&json_string, &client, &account1).await?;
                             println!("\nSolfhe Result (ZK compressed):");
-                            println!("{}", compressed_result);
+                            println!("{:?}", compressed_result);
 
-                            match transfer_compressed_hash(&client, &account1, &account2.pubkey(), &compressed_result, &result) {
+                            match transfer_compressed_hash(&client, &account1, &account2.pubkey(), &compressed_result, &result).await {
                                 Ok(signature) => {
                                     println!("Successfully transferred hash");
-                                    match retrieve_and_decompress_hash(&client, &signature) {
+                                    match retrieve_and_decompress_hash(&client, &signature).await {
                                         Ok(decompressed_json) => {
                                             println!("Retrieved and decompressed JSON data:");
                                             println!("{}", serde_json::to_string_pretty(&decompressed_json)?);
                                             
-                                            // Save the decompressed JSON to solfhe.json file
                                             if let Err(e) = save_json_to_file(&decompressed_json, "solfhe.json") {
                                                 println!("Error saving JSON to file: {}", e);
                                             }
 
-                                            // Execute Python script after saving JSON
+                                            // Python script execution remains the same
                                             match Command::new("python3")
                                                 .arg("blink-matcher.py")
                                                 .status() {
