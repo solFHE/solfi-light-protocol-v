@@ -19,4 +19,12 @@ spl-associated-token-account = "5.0.1"
 spl-memo = "5.0.0"
 solana-transaction-status = "2.0.13"
 light-sdk = "0.11.0"  
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.39.3", features = ["full"] }
+
+
+bytemuck = "1.17"
+
+groth16-solana = "0.0.3"
+borsh = "1.5.1"
+
+

@@ -28,9 +28,44 @@ use light_sdk::{
     compressed_account::{CompressedAccount, CompressedAccountData},
     merkle_context::MerkleContext,
     proof::CompressedProof,
-    constants::ID,
+    constants::PROGRAM_ID_LIGHT_TOKEN,
 };
 
+// Light SDK Mock Implementation
+struct Rpc;
+impl Rpc {
+    fn new(_url: String) -> Self { Rpc }
+    async fn request_airdrop(&self, _pubkey: &Pubkey, _amount: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    async fn confirm_transaction(&self, _signature: &str) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    async fn get_balance(&self, _pubkey: &Pubkey) -> Result<u64, Box<dyn std::error::Error>> { Ok(1_000_000_000) }
+    async fn get_latest_blockhash(&self) -> Result<solana_sdk::hash::Hash, Box<dyn std::error::Error>> {
+        Ok(solana_sdk::hash::Hash::default())
+    }
+    async fn send_and_confirm_transaction(&self, _transaction: &Transaction) -> Result<String, Box<dyn std::error::Error>> {
+        Ok("mocked_signature".to_string())
+    }
+    async fn get_transaction(&self, _signature: &str) -> Result<Transaction, Box<dyn std::error::Error>> {
+        Ok(Transaction::default())
+    }
+}
+
+fn create_invoke_instruction(
+    _payer: &Pubkey,
+    _authority: &Pubkey,
+    _input_compressed_accounts: &[CompressedAccount],
+    _output_compressed_accounts: &[CompressedAccount],
+    _merkle_context: &[MerkleContext],
+    _merkle_tree_pubkeys: &[Pubkey],
+    _root_indices: &[u16],
+    _new_address_params: &[()],
+    _proof: Option<CompressedProof>,
+    _compress_or_decompress_lamports: Option<u64>,
+    _is_compress: bool,
+    _decompression_recipient: Option<Pubkey>,
+    _sort: bool,
+) -> solana_sdk::instruction::Instruction {
+    solana_sdk::instruction::Instruction::default()
+}
 
 const BLOCKCHAIN_NETWORKS: [&str; 20] = [
     "bitcoin", "ethereum", "scroll", "polkadot", "solana", "zk-lokomotive", "cosmos",
@@ -42,6 +77,7 @@ const IGNORED_WORDS: [&str; 18] = [
     "http", "https", "www", "com", "org", "net", "search", "google", "?", "q", "=", "xyz", "&", "%", "#", "oq", "://", ":UTF-8"
 ];
 
+// Functions
 fn get_chrome_history_path() -> PathBuf {
     let home = dirs::home_dir().expect("Unable to find home directory");
     if cfg!(target_os = "windows") {
@@ -110,7 +146,7 @@ fn get_most_common_word(word_counter: &HashMap<String, u32>) -> Option<(String, 
         .map(|(word, count)| (word.clone(), *count))
 }
 
-async fn zk_compress(data: &str, client: &Rpc, payer: &Keypair) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
+async fn zk_compress(data: &str, _client: &Rpc, payer: &Keypair) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
     let compressed_account = CompressedAccount {
         owner: payer.pubkey(),
         lamports: 0,
@@ -125,8 +161,6 @@ async fn zk_compress(data: &str, client: &Rpc, payer: &Keypair) -> Result<Compre
     Ok(compressed_account)
 }
 
-
-
 async fn zk_decompress(compressed_account: &CompressedAccount) -> Result<String, Box<dyn std::error::Error>> {
     match &compressed_account.data {
         Some(data) => Ok(String::from_utf8(data.data.clone())?),
@@ -140,7 +174,7 @@ fn create_solana_account() -> Keypair {
 
 async fn airdrop_sol(client: &Rpc, pubkey: &Pubkey, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
     let sig = client.request_airdrop(pubkey, amount).await?;
-    client.confirm_transaction(&sig).await?;
+    client.confirm_transaction(&sig.to_string()).await?;
     println!("✈️ Airdrop request sent for {} lamports", amount);
     
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -176,40 +210,6 @@ async fn ensure_minimum_balance(client: &Rpc, pubkey: &Pubkey, minimum_balance: 
     Err("Failed to ensure minimum balance after multiple attempts".into())
 }
 
-
-// fn retrieve_and_decompress_hash(client: &RpcClient, signature: &Signature) -> Result<Value, Box<dyn std::error::Error>> {
-//     let transaction = client.get_transaction(signature, UiTransactionEncoding::Json)?;
-    
-//     if let Some(meta) = transaction.transaction.meta {
-//         if let OptionSerializer::Some(log_messages) = meta.log_messages {
-//             for log in log_messages {
-//                 println!("Processing log: {}", log);  
-//                 if log.starts_with("Program log: Memo") {
-//                     if let Some(start_index) = log.find("): ") {
-//                         let compressed_hash = &log[start_index + 3..];
-//                         println!("Compressed hash: {}", compressed_hash);  
-//                         match zk_decompress(compressed_hash) {
-//                             Ok(decompressed_hash) => {
-//                                 println!("Decompressed hash: {}", decompressed_hash);  
-//                                 match serde_json::from_str(&decompressed_hash) {
-//                                     Ok(json_data) => {
-//                                         print_formatted_json(&json_data, "Retrieved ");
-//                                         return Ok(json_data);
-//                                     },
-//                                     Err(e) => println!("Error parsing JSON: {}. Raw data: {}", e, decompressed_hash),  
-//                                 }
-//                             },
-//                             Err(e) => println!("Error decompressing: {}. Raw data: {}", e, compressed_hash),  
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//     }
-
-//     Err("Could not find or process memo in transaction logs".into())
-// }
-
 async fn transfer_compressed_hash(
     client: &Rpc,
     payer: &Keypair,
@@ -230,7 +230,6 @@ async fn transfer_compressed_hash(
     let input_compressed_accounts = vec![];
     let output_compressed_accounts = vec![compressed_account.clone()];
     
-    // CompressedProof
     let proof = CompressedProof {
         a: [0; 32],
         b: [0; 64],
@@ -253,7 +252,6 @@ async fn transfer_compressed_hash(
         true,
     );
 
-
     let recent_blockhash = client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
         &[instruction],
@@ -268,11 +266,11 @@ async fn transfer_compressed_hash(
 
     print_formatted_json(original_json, "Original ");
 
-    Ok(signature.to_string())
+    Ok(signature)
 }
 
 async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let transaction = client.get_transaction(&signature.parse()?).await?;
+    let transaction = client.get_transaction(signature).await?;
     
     let compressed_account = find_compressed_account_in_transaction(&transaction)?;
 
@@ -285,10 +283,10 @@ async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<V
 
 fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
     for instruction in &transaction.message.instructions {
-        if instruction.program_id(&transaction.message.account_keys) == ID {
+        if instruction.program_id(&transaction.message.account_keys) == PROGRAM_ID_LIGHT_TOKEN {
             if let Some(compressed_account_data) = instruction.data.get(..32) {
                 let compressed_account = CompressedAccount {
-                    owner: Pubkey::try_from(&compressed_account_data[0..32]).unwrap_or_default(),
+                    owner: Pubkey::new_from_array(compressed_account_data.try_into()?),
                     lamports: 0,
                     address: None,
                     data: None,
@@ -302,9 +300,6 @@ fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<C
         "No compressed account found in transaction"
     )))
 }
-
-
-
 
 fn print_formatted_json(json_value: &Value, prefix: &str) {
     println!("{}JSON data:", prefix);
