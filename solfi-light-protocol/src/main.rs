@@ -8,13 +8,9 @@ analyze_link metodu, her bir linki ayrıştırır ve içindeki anlamlı kelimele
 get_most_common_word ve to_json metotları, en sık kullanılan kelimeyi bulur ve JSON formatında çıktı üretir.
 run metodu, sürekli çalışan bir döngü içinde her 60 saniyede bir yeni linkleri kontrol eder. */
 
-
-
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-// use std::thread;
 use std::time::Duration;
 use serde_json::{json, Value};
 use rusqlite::Connection;
@@ -24,20 +20,16 @@ use solana_sdk::{
     transaction::Transaction,
     pubkey::Pubkey,
 };
-// use solana_client::rpc_client::RpcClient;
 use std::fs::File;
 use std::io::Write;
 use std::process::Command;
 
 use light_sdk::{
     compressed_account::{CompressedAccount, CompressedAccountData},
-    instruction::{create_invoke_instruction, InstructionDataInvoke},
     merkle_context::MerkleContext,
     proof::CompressedProof,
-    stateless::Rpc,
-    ID,
+    constants::ID,
 };
-
 
 
 const BLOCKCHAIN_NETWORKS: [&str; 20] = [
@@ -237,8 +229,14 @@ async fn transfer_compressed_hash(
 
     let input_compressed_accounts = vec![];
     let output_compressed_accounts = vec![compressed_account.clone()];
-    let proof = CompressedProof::new();
     
+    // CompressedProof
+    let proof = CompressedProof {
+        a: [0; 32],
+        b: [0; 64],
+        c: [0; 32],
+    };
+
     let instruction = create_invoke_instruction(
         &payer.pubkey(),
         &payer.pubkey(),
@@ -254,6 +252,7 @@ async fn transfer_compressed_hash(
         None,
         true,
     );
+
 
     let recent_blockhash = client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
@@ -288,7 +287,6 @@ fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<C
     for instruction in &transaction.message.instructions {
         if instruction.program_id(&transaction.message.account_keys) == ID {
             if let Some(compressed_account_data) = instruction.data.get(..32) {
-
                 let compressed_account = CompressedAccount {
                     owner: Pubkey::try_from(&compressed_account_data[0..32]).unwrap_or_default(),
                     lamports: 0,
