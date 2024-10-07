@@ -30,11 +30,12 @@ use std::io::Write;
 use std::process::Command;
 
 use light_sdk::{
-    compressed_account::CompressedAccount,
+    compressed_account::{CompressedAccount, CompressedAccountData},
     instruction::{create_invoke_instruction, InstructionDataInvoke},
     merkle_context::MerkleContext,
     proof::CompressedProof,
     stateless::Rpc,
+    ID,
 };
 
 
@@ -121,7 +122,11 @@ async fn zk_compress(data: &str, client: &Rpc, payer: &Keypair) -> Result<Compre
         owner: payer.pubkey(),
         lamports: 0,
         address: None,
-        data: Some(data.as_bytes().to_vec()),
+        data: Some(CompressedAccountData {
+            discriminator: [0; 8],  
+            data: data.as_bytes().to_vec(),
+            data_hash: [0; 32], 
+        }),
     };
 
     Ok(compressed_account)
@@ -131,7 +136,7 @@ async fn zk_compress(data: &str, client: &Rpc, payer: &Keypair) -> Result<Compre
 
 async fn zk_decompress(compressed_account: &CompressedAccount) -> Result<String, Box<dyn std::error::Error>> {
     match &compressed_account.data {
-        Some(data) => Ok(String::from_utf8(data.clone())?),
+        Some(data) => Ok(String::from_utf8(data.data.clone())?),
         None => Err("No data in compressed account".into()),
     }
 }
@@ -140,14 +145,14 @@ fn create_solana_account() -> Keypair {
     Keypair::new()
 }
 
-fn airdrop_sol(client: &RpcClient, pubkey: &Pubkey, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let sig = client.request_airdrop(pubkey, amount)?;
-    client.confirm_transaction(&sig)?;
+async fn airdrop_sol(client: &Rpc, pubkey: &Pubkey, amount: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let sig = client.request_airdrop(pubkey, amount).await?;
+    client.confirm_transaction(&sig).await?;
     println!("✈️ Airdrop request sent for {} lamports", amount);
     
-    thread::sleep(Duration::from_secs(5));
+    tokio::time::sleep(Duration::from_secs(5)).await;
     
-    let balance = client.get_balance(pubkey)?;
+    let balance = client.get_balance(pubkey).await?;
     println!("Current balance after airdrop: {} lamports", balance);
     
     if balance == 0 {
@@ -157,26 +162,60 @@ fn airdrop_sol(client: &RpcClient, pubkey: &Pubkey, amount: u64) -> Result<(), B
     Ok(())
 }
 
-fn ensure_minimum_balance(client: &RpcClient, pubkey: &Pubkey, minimum_balance: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn ensure_minimum_balance(client: &Rpc, pubkey: &Pubkey, minimum_balance: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut attempts = 0;
     while attempts < 3 {
-        let balance = client.get_balance(pubkey)?;
+        let balance = client.get_balance(pubkey).await?;
         if balance >= minimum_balance {
             println!("Sufficient balance: {} lamports", balance);
             return Ok(());
         }
         
         println!("Insufficient balance: {} lamports. Attempting airdrop...", balance);
-        if let Err(e) = airdrop_sol(client, pubkey, minimum_balance - balance) {
+        if let Err(e) = airdrop_sol(client, pubkey, minimum_balance - balance).await {
             println!("Airdrop attempt failed: {}. Retrying...", e);
         }
         
         attempts += 1;
-        thread::sleep(Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
     
     Err("Failed to ensure minimum balance after multiple attempts".into())
 }
+
+
+// fn retrieve_and_decompress_hash(client: &RpcClient, signature: &Signature) -> Result<Value, Box<dyn std::error::Error>> {
+//     let transaction = client.get_transaction(signature, UiTransactionEncoding::Json)?;
+    
+//     if let Some(meta) = transaction.transaction.meta {
+//         if let OptionSerializer::Some(log_messages) = meta.log_messages {
+//             for log in log_messages {
+//                 println!("Processing log: {}", log);  
+//                 if log.starts_with("Program log: Memo") {
+//                     if let Some(start_index) = log.find("): ") {
+//                         let compressed_hash = &log[start_index + 3..];
+//                         println!("Compressed hash: {}", compressed_hash);  
+//                         match zk_decompress(compressed_hash) {
+//                             Ok(decompressed_hash) => {
+//                                 println!("Decompressed hash: {}", decompressed_hash);  
+//                                 match serde_json::from_str(&decompressed_hash) {
+//                                     Ok(json_data) => {
+//                                         print_formatted_json(&json_data, "Retrieved ");
+//                                         return Ok(json_data);
+//                                     },
+//                                     Err(e) => println!("Error parsing JSON: {}. Raw data: {}", e, decompressed_hash),  
+//                                 }
+//                             },
+//                             Err(e) => println!("Error decompressing: {}. Raw data: {}", e, compressed_hash),  
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+
+//     Err("Could not find or process memo in transaction logs".into())
+// }
 
 async fn transfer_compressed_hash(
     client: &Rpc,
@@ -224,47 +263,13 @@ async fn transfer_compressed_hash(
     );
     
     let signature = client.send_and_confirm_transaction(&transaction).await?;
-    println!("🏆 Successfully transferred compressed hash. Transaction signature: {}", signature);
-    println!("⛓️✅ Transaction link: https://explorer.solana.com/tx/{}?cluster=custom", signature);
+    println!("✅ Successfully transferred compressed hash. Transaction signature: {}", signature);
+    println!("⛓️⛓️ Transaction link: https://explorer.solana.com/tx/{}?cluster=custom", signature);
 
     print_formatted_json(original_json, "Original ");
 
     Ok(signature.to_string())
 }
-
-
-// fn retrieve_and_decompress_hash(client: &RpcClient, signature: &Signature) -> Result<Value, Box<dyn std::error::Error>> {
-//     let transaction = client.get_transaction(signature, UiTransactionEncoding::Json)?;
-    
-//     if let Some(meta) = transaction.transaction.meta {
-//         if let OptionSerializer::Some(log_messages) = meta.log_messages {
-//             for log in log_messages {
-//                 println!("Processing log: {}", log);  
-//                 if log.starts_with("Program log: Memo") {
-//                     if let Some(start_index) = log.find("): ") {
-//                         let compressed_hash = &log[start_index + 3..];
-//                         println!("Compressed hash: {}", compressed_hash);  
-//                         match zk_decompress(compressed_hash) {
-//                             Ok(decompressed_hash) => {
-//                                 println!("Decompressed hash: {}", decompressed_hash);  
-//                                 match serde_json::from_str(&decompressed_hash) {
-//                                     Ok(json_data) => {
-//                                         print_formatted_json(&json_data, "Retrieved ");
-//                                         return Ok(json_data);
-//                                     },
-//                                     Err(e) => println!("Error parsing JSON: {}. Raw data: {}", e, decompressed_hash),  
-//                                 }
-//                             },
-//                             Err(e) => println!("Error decompressing: {}. Raw data: {}", e, compressed_hash),  
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//     }
-
-//     Err("Could not find or process memo in transaction logs".into())
-// }
 
 async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let transaction = client.get_transaction(&signature.parse()?).await?;
@@ -280,14 +285,25 @@ async fn retrieve_and_decompress_hash(client: &Rpc, signature: &str) -> Result<V
 
 fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<CompressedAccount, Box<dyn std::error::Error>> {
     for instruction in &transaction.message.instructions {
-        if instruction.program_id == light_sdk::ID {
+        if instruction.program_id(&transaction.message.account_keys) == ID {
             if let Some(compressed_account_data) = instruction.data.get(..32) {
-                return Ok(CompressedAccount::try_from_slice(compressed_account_data)?);
+                
+                let compressed_account = CompressedAccount {
+                    owner: Pubkey::new(&compressed_account_data[0..32]),
+                    lamports: 0,
+                    address: None,
+                    data: None,
+                };
+                return Ok(compressed_account);
             }
         }
     }
-    Err("No compressed account found in transaction".into())
+    Err(Box::new(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "No compressed account found in transaction"
+    )))
 }
+
 
 
 
@@ -382,6 +398,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => println!("No new links found"),
             Err(e) => println!("Error extracting links from Chrome: {}", e),
         }
-        thread::sleep(Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
