@@ -14,7 +14,7 @@ run metodu, sürekli çalışan bir döngü içinde her 60 saniyede bir yeni lin
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::thread;
+// use std::thread;
 use std::time::Duration;
 use serde_json::{json, Value};
 use rusqlite::Connection;
@@ -24,7 +24,7 @@ use solana_sdk::{
     transaction::Transaction,
     pubkey::Pubkey,
 };
-use solana_client::rpc_client::RpcClient;
+// use solana_client::rpc_client::RpcClient;
 use std::fs::File;
 use std::io::Write;
 use std::process::Command;
@@ -37,6 +37,7 @@ use light_sdk::{
     stateless::Rpc,
     ID,
 };
+
 
 
 const BLOCKCHAIN_NETWORKS: [&str; 20] = [
@@ -162,7 +163,7 @@ async fn airdrop_sol(client: &Rpc, pubkey: &Pubkey, amount: u64) -> Result<(), B
     Ok(())
 }
 
-async fn ensure_minimum_balance(client: &Rpc, pubkey: &Pubkey, minimum_balance: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn ensure_minimum_balance(client: &Rpc, pubkey: &Pubkey, minimum_balance: u64) -> Result<(), Box<dyn std::error::Error>> {    
     let mut attempts = 0;
     while attempts < 3 {
         let balance = client.get_balance(pubkey).await?;
@@ -236,8 +237,8 @@ async fn transfer_compressed_hash(
 
     let input_compressed_accounts = vec![];
     let output_compressed_accounts = vec![compressed_account.clone()];
-    let proof = CompressedProof::default();
-
+    let proof = CompressedProof::new();
+    
     let instruction = create_invoke_instruction(
         &payer.pubkey(),
         &payer.pubkey(),
@@ -287,9 +288,9 @@ fn find_compressed_account_in_transaction(transaction: &Transaction) -> Result<C
     for instruction in &transaction.message.instructions {
         if instruction.program_id(&transaction.message.account_keys) == ID {
             if let Some(compressed_account_data) = instruction.data.get(..32) {
-                
+
                 let compressed_account = CompressedAccount {
-                    owner: Pubkey::new(&compressed_account_data[0..32]),
+                    owner: Pubkey::try_from(&compressed_account_data[0..32]).unwrap_or_default(),
                     lamports: 0,
                     address: None,
                     data: None,
@@ -322,7 +323,7 @@ fn save_json_to_file(json_data: &Value, filename: &str) -> Result<(), Box<dyn st
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting Solfhe Analyzer with Light Protocol");
+    println!("Starting Solphi with Light Protocol");
 
     let client = Rpc::new("http://localhost:8899".to_string());
     
@@ -332,8 +333,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Account 1 public key: {}", account1.pubkey());
     println!("Account 2 public key: {}", account2.pubkey());
     
-    ensure_minimum_balance(&client, &account1.pubkey(), 1_000_000_000).await?;
-    
+    ensure_minimum_balance(&client, &account1.pubkey(), 1_000_000_000).await?;    
+
     let mut links = Vec::new();
     let mut word_counter = HashMap::new();
 
